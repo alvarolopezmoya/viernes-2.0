@@ -24,15 +24,13 @@ WAKE_KEYWORDS: list[str] = [
     "oye viernes",
     "hey viernes",
     "ey viernes",
-    "buenos días",
-    "buenos dias",
-    "buenas tardes",
-    "buenas noches",
     "papa esta en casa",
     "papá esta en casa",
     "papa está en casa",
     "papá está en casa",
 ]
+# Nota: "buenos días/tardes/noches" se quitaron — provocaban activación al
+# saludar a otra persona. La activación siempre requiere "viernes" o la frase clave.
 
 # VAD: energía mínima para considerar que hay voz (ajustable según micrófono)
 VAD_ENERGY_THRESHOLD: float = 0.003
@@ -47,7 +45,7 @@ WAKE_COMMAND_DELAY_SEC: float = 0.3
 SAMPLE_RATE: int = 16000
 CHUNK_SIZE: int = 1024
 CHANNELS: int = 1
-SILENCE_TIMEOUT_SEC: float = 1.0        # Silencio para cortar el comando
+SILENCE_TIMEOUT_SEC: float = 0.6        # Silencio para cortar el comando (más bajo = responde antes)
 MAX_COMMAND_DURATION_SEC: float = 12.0  # Duración máxima de un comando
 
 # ================================================================
@@ -74,6 +72,9 @@ OLLAMA_MODEL: str = _hw_config.get("ollama_model", "llama3.2:1b")
 OLLAMA_TIMEOUT_SEC: int = 15
 OLLAMA_CONTEXT_LENGTH: int = 1024        # Contexto reducido = respuesta más rápida
 MAX_HISTORY_MESSAGES: int = 4            # Solo últimos 4 turnos — suficiente contexto
+# Capas a descargar en GPU. -1/99 = todas. Se lee de hw_config para no forzar
+# OOM en GPUs con poca VRAM. En GTX 1650 (4GB) con Whisper 'base' caben todas.
+OLLAMA_NUM_GPU: int = _hw_config.get("ollama_num_gpu", 99)
 
 # ================================================================
 # TTS — EDGE-TTS (gratuito, sin API key)

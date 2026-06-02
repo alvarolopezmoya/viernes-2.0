@@ -42,6 +42,7 @@ from config import (
     OLLAMA_BASE_URL,
     OLLAMA_CONTEXT_LENGTH,
     OLLAMA_MODEL,
+    OLLAMA_NUM_GPU,
     OLLAMA_TIMEOUT_SEC,
     SAMPLE_RATE,
     SYSTEM_PROMPT,
@@ -95,6 +96,11 @@ class JARVISMemory:
 
     def __init__(self) -> None:
         self.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        # WAL: lectores y escritores no se bloquean entre sí (StatsPanel lee
+        # cada 2s mientras process_voice escribe). busy_timeout evita
+        # 'database is locked' bajo concurrencia.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=3000")
         self.conn.executescript(self._SCHEMA)
         for key, value in self._DEFAULTS:
             self.conn.execute(
@@ -582,6 +588,9 @@ class JARVISBrain:
         self._silent_until: Optional[float] = None  # timestamp Unix hasta el que VIERNES calla
         # Diálogo de confirmación para acciones destructivas (borrar/mover/renombrar)
         self._pending_confirmation: Optional[dict] = None
+        # Protege _is_processing y _pending_confirmation entre threads
+        # (process_voice, watcher de notificaciones, captura de respuestas)
+        self._state_lock = threading.Lock()
         self._load_whisper()
         self._init_pygame()
         self._start_notification_watcher()
@@ -665,8 +674,11 @@ class JARVISBrain:
 
     def _on_new_notification(self, msg: str) -> None:
         """Callback del watcher: habla la notificación si VIERNES no está ocupado."""
-        if self._is_processing or self._is_silent_mode():
-            return  # No interrumpir un comando en curso ni el modo DND
+        with self._state_lock:
+            busy = self._is_processing or self._pending_confirmation is not None
+        # No interrumpir un comando en curso, una confirmación pendiente ni el modo DND
+        if busy or self._is_silent_mode():
+            return
         threading.Thread(
             target=self._speak_sync,
             args=(msg,),
@@ -925,12 +937,13 @@ class JARVISBrain:
             f"¿Confirma que desea {verb} el archivo {target.name}, Señor? Diga sí o no."
         )
         self.on_message(JARVIS_NAME, question)
-        self._pending_confirmation = {
-            "intent": intent,
-            "kwargs": kwargs,
-            "target_name": target.name,
-            "ts": time.time(),
-        }
+        with self._state_lock:
+            self._pending_confirmation = {
+                "intent": intent,
+                "kwargs": kwargs,
+                "target_name": target.name,
+                "ts": time.time(),
+            }
         self._speak_sync(question)
         self._trigger_listen_again()   # Re-escuchar la respuesta sin wake word
 
@@ -941,8 +954,9 @@ class JARVISBrain:
         o expiró, en cuyo caso se cancela la acción y el texto sigue su curso
         como comando normal.
         """
-        pending = self._pending_confirmation
-        self._pending_confirmation = None
+        with self._state_lock:
+            pending = self._pending_confirmation
+            self._pending_confirmation = None   # pop atómico
         if not pending:
             return False
 
@@ -1006,7 +1020,8 @@ class JARVISBrain:
             )
             return
 
-        self._is_processing = True
+        with self._state_lock:
+            self._is_processing = True
         self._stop_speaking.clear()   # Reset interrupción para este comando
         self.on_status_change(STATE_PROCESSING)
 
@@ -1019,7 +1034,9 @@ class JARVISBrain:
             self.on_message("Tú", text)
 
             # Confirmación pendiente de una acción destructiva → interpretar sí/no
-            if self._pending_confirmation is not None:
+            with self._state_lock:
+                has_pending = self._pending_confirmation is not None
+            if has_pending:
                 if self._handle_confirmation(text):
                     return
                 # Respuesta ambigua/expirada → seguir procesando como comando normal
@@ -1101,7 +1118,8 @@ class JARVISBrain:
                     response = self._stream_and_speak(text)
                     self.memory.save_conversation(text, response)
         finally:
-            self._is_processing = False
+            with self._state_lock:
+                self._is_processing = False
             self.on_status_change(STATE_IDLE)
 
     # ----------------------------------------------------------------
@@ -1160,13 +1178,15 @@ class JARVISBrain:
 
     def _detect_intent(self, text: str) -> Optional[str]:
         """
-        Pipeline de detección de intención en 3 etapas:
+        Pipeline de detección de intención en 2 etapas (sin LLM → más rápido):
 
         Stage 1 (<1ms):  keyword matching exacto/substring con normalización de acentos.
         Stage 2 (<5ms):  TF-IDF coseno via SemanticRouter — captura paráfrasis y
                          variaciones que no están en el INTENT_MAP.
-        Stage 3 (~400ms): _llm_classify_intent — solo para comandos ambiguos que
-                         pasan ambos filtros anteriores.
+
+        Si ninguna etapa decide, retorna None → conversación libre con Ollama.
+        (El antiguo Stage 3 con llama3.2:1b se eliminó: añadía ~400ms y, al ser un
+        modelo de 1B, devolvía intents equivocados — fallaba más de lo que acertaba.)
         """
         def _strip_accents(s: str) -> str:
             s = unicodedata.normalize("NFD", s)
@@ -1192,60 +1212,6 @@ class JARVISBrain:
             if intent:
                 logger.info(f"[S2-SEM] Intención: {intent} (score={score:.3f})")
                 return intent
-
-        # Stage 3 — LLM classify (fallback lento, solo si el texto parece un comando)
-        # Evitar llamar al LLM para frases claramente conversacionales (> 8 palabras
-        # suelen ser preguntas, no comandos del sistema).
-        word_count = len(text.split())
-        if word_count <= 8:
-            intent = self._llm_classify_intent(text)
-            if intent:
-                logger.info(f"[S3-LLM] Intención: {intent}")
-                return intent
-
-        return None
-
-    def _llm_classify_intent(self, text: str) -> Optional[str]:
-        """
-        Usa Ollama para clasificar el intent cuando el keyword matching falla.
-        Responde SOLO con el nombre del intent o 'none'.
-        """
-        import ollama
-
-        actions_desc = (
-            "activate_work_mode: activar modo trabajo, cerrar distracciones y abrir editor+terminal\n"
-            "get_system_stats: ver estado del sistema, cpu, ram, memoria, rendimiento\n"
-            "open_vscode: abrir editor de codigo, vscode, visual studio\n"
-            "open_terminal: abrir terminal, consola, cmd, powershell\n"
-            "lock_screen: bloquear pantalla, bloquear equipo\n"
-            "minimize_all: minimizar ventanas, limpiar pantalla, escritorio\n"
-            "close_distractions: cerrar chrome, discord, spotify, distracciones\n"
-            "screenshot: captura de pantalla, screenshot, foto de pantalla\n"
-            "none: cualquier otra cosa, conversacion, preguntas, charla"
-        )
-
-        prompt = (
-            f"Clasifica este comando de voz en UNA de estas categorías.\n"
-            f"Responde ÚNICAMENTE con el nombre exacto de la categoría, nada más.\n\n"
-            f"Categorías:\n{actions_desc}\n\n"
-            f"Comando: \"{text}\"\n"
-            f"Categoría:"
-        )
-
-        try:
-            response = ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                options={"num_ctx": 512, "num_thread": os.cpu_count() or 4},
-            )
-            intent = response["message"]["content"].strip().lower().split()[0]
-            # Limpiar puntuación residual
-            intent = intent.strip(".,!?:;\"'")
-            if intent in self.INTENT_MAP:
-                logger.info(f"Intención detectada (LLM): {intent}")
-                return intent
-        except Exception as e:
-            logger.debug(f"LLM intent classification failed: {e}")
 
         return None
 
@@ -1291,31 +1257,8 @@ class JARVISBrain:
         if intent == "volume_set":
             return action_fn(percent=self._extract_percent(original_text) or 50)
 
-        # ── Búsqueda web (gestión interna — habla el resultado) ──
-        if intent == "web_search":
-            query = self._extract_search_query(original_text)
-            result = action_fn(query=query)
-            if result["success"] and result["message"]:
-                data = result.get("data") or {}
-                summary = (
-                    result["message"] if data.get("realtime")
-                    else self._summarize_web_content(query, result["message"])
-                )
-                self.on_message(JARVIS_NAME, summary)
-                self.memory.save_conversation(original_text, summary, "web_search")
-
-                # Abrir Chrome con Google search en paralelo al TTS
-                threading.Thread(
-                    target=self._open_search_in_chrome,
-                    args=(query,),
-                    daemon=True,
-                    name="jarvis_chrome",
-                ).start()
-
-                self._speak_sync(summary)
-            else:
-                self._speak_sync(result.get("message", "No encontré resultados."))
-            return None
+        # Nota: web_search se gestiona en process_voice antes de llegar aquí,
+        # por eso no hay rama para él en este dispatcher (evita duplicación).
 
         # ── Archivos y aplicaciones ──────────────────────────────
         if intent == "open_app":
@@ -2025,7 +1968,7 @@ class JARVISBrain:
             for chunk in ollama.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                options={"num_ctx": 2048, "num_gpu": 99, "num_predict": 100},
+                options={"num_ctx": 2048, "num_gpu": OLLAMA_NUM_GPU, "num_predict": 100},
                 stream=True,
             ):
                 chunks.append(chunk["message"]["content"])
@@ -2074,6 +2017,16 @@ class JARVISBrain:
                     audio_queue.put((buffer.strip(), fut))
             except Exception as e:
                 logger.error(f"Error en generate_and_tts: {e}")
+                # Ollama caído/sin respuesta → no dejar al usuario en silencio.
+                # Solo avisar si aún no se había generado nada audible.
+                if not full_response:
+                    fallback = (
+                        "Parece que mi cerebro necesita un momento, Señor. "
+                        "Verifique que Ollama esté corriendo."
+                    )
+                    full_response.append(fallback)
+                    fut = self._tts_executor.submit(self._tts_bytes, fallback)
+                    audio_queue.put((fallback, fut))
             finally:
                 audio_queue.put(None)
 
@@ -2266,7 +2219,7 @@ class JARVISBrain:
             stream = ollama.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                options={"num_ctx": 2048, "num_gpu": 99, "num_predict": 120},
+                options={"num_ctx": 2048, "num_gpu": OLLAMA_NUM_GPU, "num_predict": 120},
                 stream=True,
             )
             for chunk in stream:
@@ -2346,7 +2299,7 @@ class JARVISBrain:
             for chunk in ollama.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                options={"num_ctx": 2048, "num_gpu": 99, "num_predict": max_tokens},
+                options={"num_ctx": 2048, "num_gpu": OLLAMA_NUM_GPU, "num_predict": max_tokens},
                 stream=True,
             ):
                 chunks.append(chunk["message"]["content"])
@@ -2376,50 +2329,11 @@ class JARVISBrain:
             options={
                 "num_ctx": OLLAMA_CONTEXT_LENGTH,
                 "num_thread": os.cpu_count() or 4,
-                "num_gpu": 99,
+                "num_gpu": OLLAMA_NUM_GPU,
                 "num_predict": 80,
             },
             stream=True,
         )
-
-    # ----------------------------------------------------------------
-    # LLM Ollama
-    # ----------------------------------------------------------------
-
-    def _query_ollama(self, user_text: str, include_stats: bool = False) -> str:
-        """Consulta a Ollama con contexto del sistema y memoria histórica."""
-        import ollama
-
-        if include_stats:
-            system_context = (
-                f"CPU: {psutil.cpu_percent():.0f}%, "
-                f"RAM: {psutil.virtual_memory().percent:.0f}%"
-            )
-        else:
-            system_context = ""
-        memory_context = self.memory.get_recent_context()
-        system = SYSTEM_PROMPT.format(
-            system_context=system_context,
-            memory_context=memory_context,
-        )
-
-        try:
-            chunks = []
-            for chunk in self._build_ollama_stream(user_text, include_stats):
-                chunks.append(chunk["message"]["content"])
-            return "".join(chunks).strip()
-        except ollama.ResponseError as e:
-            logger.error(f"Ollama ResponseError: {e}")
-            return (
-                f"Parece que el modelo '{OLLAMA_MODEL}' no está disponible, Señor. "
-                f"Ejecute: ollama pull {OLLAMA_MODEL}"
-            )
-        except Exception as e:
-            logger.error(f"Error en Ollama: {e}")
-            return (
-                "Parece que mi cerebro necesita un momento, Señor. "
-                "Verifique que Ollama esté corriendo."
-            )
 
     # ----------------------------------------------------------------
     # TTS Edge-TTS + pygame

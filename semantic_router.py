@@ -4,7 +4,7 @@ semantic_router.py — Capa de enrutamiento semántico para VIERNES 2.0.
 Pipeline de 2 etapas (sin modelos externos, solo stdlib):
   Stage 1 (<1ms):  keyword matching exacto/substring  → brain._detect_intent
   Stage 2 (<5ms):  TF-IDF coseno contra ejemplos de cada intent → SemanticRouter.route()
-  Stage 3:         retorna None → fallback a _llm_classify_intent en brain.py
+  Si ninguna decide → None → conversación libre con Ollama.
 
 No requiere sklearn ni sentence-transformers. Usa math + Counter de stdlib.
 """

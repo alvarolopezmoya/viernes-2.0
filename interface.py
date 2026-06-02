@@ -322,7 +322,7 @@ _INTENT_LABELS: dict[str, str] = {
     "read_clipboard": "Portapapeles",
     "search_memory": "Memoria",
     "read_notifications": "Notificaciones",
-    "close_distracciones": "Modo enfoque",
+    "close_distractions": "Modo enfoque",
     "minimize_all": "Minimizar",
     "small_talk": "Charla",
     "play_genre": "Género musical",
@@ -486,7 +486,8 @@ class StatsPanel(QFrame):
     def _refresh_db_stats(self) -> None:
         """Lee SQLite para contar comandos y top intents de hoy."""
         try:
-            conn = sqlite3.connect(self._db_path, timeout=1)
+            conn = sqlite3.connect(self._db_path, timeout=3)
+            conn.execute("PRAGMA busy_timeout=3000")
             # Total comandos hoy
             row = conn.execute(
                 "SELECT COUNT(*) FROM conversations "

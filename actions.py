@@ -63,6 +63,7 @@ def _get_last_project() -> str:
     """Lee la ruta del último proyecto abierto desde la base de datos."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("PRAGMA busy_timeout=3000")
         row = conn.execute(
             "SELECT value FROM preferences WHERE key=?", (LAST_PROJECT_KEY,)
         ).fetchone()
@@ -76,6 +77,7 @@ def _set_last_project(path: str) -> None:
     """Guarda la ruta del último proyecto en la base de datos."""
     try:
         conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("PRAGMA busy_timeout=3000")
         conn.execute(
             "INSERT OR REPLACE INTO preferences VALUES (?,?,datetime('now'))",
             (LAST_PROJECT_KEY, path),

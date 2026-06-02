@@ -54,7 +54,9 @@ class ReminderManager:
     # ----------------------------------------------------------------
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self._db_path, check_same_thread=False)
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=3000")   # esperar en vez de fallar si está bloqueada
+        return conn
 
     def _reload_pending(self) -> None:
         """Carga recordatorios pendientes al arrancar y los reactiva."""
