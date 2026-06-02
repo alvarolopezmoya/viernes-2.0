@@ -1,0 +1,72 @@
+# ============================================================
+# VIERNES 2.0 — .gitignore
+# ============================================================
+
+# --- Datos personales / generados en runtime (NUNCA subir) ---
+# Historial de conversaciones del usuario
+jarvis_memory.db
+*.db
+*.db-wal
+*.db-shm
+# Config específica de la máquina (se regenera con check_env.py)
+hw_config.json
+
+# --- Muestras de voz personales ---
+# Voz de referencia del usuario para clonación XTTS
+reference_voice.wav
+*.wav
+*.m4a
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+.installed.cfg
+
+# --- Entornos virtuales ---
+venv/
+.venv/
+env/
+ENV/
+.virtualenv/
+
+# --- Modelos descargados / cache ---
+models/
+*.pt
+*.bin
+*.onnx
+.cache/
+
+# --- Capturas generadas ---
+jarvis_capture_*.png
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Claude Code (config local con permisos) ---
+.claude/settings.local.json
+
+# --- Logs y temporales ---
+*.log
+*.tmp
+tmp/
+temp/
+
+# --- Sistema operativo ---
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,20 @@
+{
+  "_comment": "EJEMPLO. No editar a mano. Ejecuta `python check_env.py` para generar tu propio hw_config.json detectando tu hardware automáticamente.",
+  "cpu_cores_physical": 6,
+  "cpu_cores_logical": 12,
+  "ram_gb": 16.0,
+  "gpu_vendor": "nvidia",
+  "gpu_name": "NVIDIA GeForce GTX 1650",
+  "gpu_vram_gb": 4.0,
+  "directml_available": false,
+  "opencl_available": false,
+  "cuda_available": true,
+  "cuda_version": null,
+  "whisper_device": "cuda",
+  "whisper_model": "medium",
+  "whisper_threads": 6,
+  "ollama_model": "llama3.2:1b",
+  "ollama_num_thread": 6,
+  "audio_workers": 6,
+  "code_editor": "notepad.exe"
+}

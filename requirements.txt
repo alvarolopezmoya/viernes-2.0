@@ -1,0 +1,60 @@
+# ============================================================
+# VIERNES 2.0 — Requirements
+# Python 3.11 | Windows 10/11
+# ============================================================
+#
+# PASO PREVIO OBLIGATORIO — instalar PyTorch con CUDA antes de
+# ejecutar este archivo:
+#
+#   GPU NVIDIA (recomendado para esta máquina — GTX 1650):
+#     py -3.11 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+#   CPU only (fallback si no hay GPU NVIDIA):
+#     py -3.11 -m pip install torch torchvision
+#
+# Luego instalar el resto:
+#   py -3.11 -m pip install -r requirements.txt
+#
+# Y descargar un modelo Ollama:
+#   ollama pull llama3.2:1b
+# ============================================================
+
+# --- IA principal ---
+faster-whisper>=1.0.1
+ollama>=0.2.1
+edge-tts>=6.1.10
+
+# --- Audio ---
+PyAudio==0.2.14
+pygame>=2.6.1
+
+# --- UI ---
+PyQt6>=6.7.0
+
+# --- Cómputo numérico ---
+numpy>=1.22,<2.5
+scipy>=1.11.0
+
+# --- Sistema y utilidades ---
+psutil>=5.9.8
+pyautogui>=0.9.54
+soundfile>=0.12.1
+pycaw>=20240210
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+ddgs>=6.3.0
+pywin32>=306
+winsdk>=1.0.0b10
+keyboard>=0.13.5
+yt-dlp>=2024.1.0
+
+# ============================================================
+# OPCIONAL — DirectML (solo AMD/Intel GPU, NO para NVIDIA)
+# Descomenta solo si tienes GPU AMD o Intel integrada:
+# torch-directml==0.2.5.dev240914   # requiere torch==2.4.1 exacto
+# onnxruntime-directml>=1.19.2
+#
+# OPCIONAL — OpenCL (no requerido para el núcleo de JARVIS)
+# pyopencl>=2024.2.7
+# ============================================================
