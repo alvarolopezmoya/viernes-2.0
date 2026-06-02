@@ -121,14 +121,14 @@ def main() -> None:
     def _on_wake() -> None:
         """Mostrar interfaz al detectar palabra clave."""
         QTimer.singleShot(0, interface.wake_up)
-        def _phrase_then_capture():
-            # 1. Reproduce la frase (bloqueante — termina cuando acaba el audio)
-            brain.play_wake_phrase()
-            # 2. Pequeño buffer para que el micrófono no capture el eco de la frase
-            time.sleep(0.15)
-            # 3. Iniciar captura exactamente cuando VIERNES termina de hablar
+        def _beep_then_capture():
+            # 1. Beep corto (~0.2s, bloqueante) en vez de frase → captura antes
+            brain.play_wake_beep()
+            # 2. Buffer mínimo para no capturar la cola del beep
+            time.sleep(0.05)
+            # 3. Iniciar captura del comando
             listener.start_capture_now()
-        threading.Thread(target=_phrase_then_capture, daemon=True, name="jarvis_wake").start()
+        threading.Thread(target=_beep_then_capture, daemon=True, name="jarvis_wake").start()
 
     def _on_command(audio) -> None:
         """Procesar comando de voz en un thread separado (nunca en el hilo Qt)."""

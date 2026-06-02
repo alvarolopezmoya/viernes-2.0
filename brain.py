@@ -50,6 +50,7 @@ from config import (
     TTS_PITCH,
     TTS_RATE,
     TTS_VOICE,
+    WAKE_WHISPER_MODEL,
     WHISPER_DEVICE,
     WHISPER_INITIAL_PROMPT,
     WHISPER_LANGUAGE,
@@ -759,6 +760,32 @@ class JARVISBrain:
             self._whisper_model = None
             self._whisper_backend = None
 
+        # Modelo dedicado 'tiny' para la detección continua de palabra clave.
+        # Se carga en background para no retrasar el arranque; hasta que esté
+        # listo, check_wake_keyword usa el modelo de comando como fallback.
+        self._wake_whisper_model = None
+        threading.Thread(
+            target=self._load_wake_whisper, daemon=True, name="wake_whisper_load"
+        ).start()
+
+    def _load_wake_whisper(self) -> None:
+        """Carga el modelo 'tiny' dedicado a oír la palabra clave (rápido, poca VRAM)."""
+        if WAKE_WHISPER_MODEL == WHISPER_MODEL:
+            # Mismo modelo que el comando — no duplicar, reusar
+            self._wake_whisper_model = self._whisper_model
+            return
+        try:
+            from faster_whisper import WhisperModel
+            device = WHISPER_DEVICE if WHISPER_DEVICE in ("cuda", "cpu") else "cpu"
+            compute = "int8_float16" if device == "cuda" else "int8"
+            self._wake_whisper_model = WhisperModel(
+                WAKE_WHISPER_MODEL, device=device, compute_type=compute, num_workers=1,
+            )
+            logger.info(f"Wake-word: faster-whisper '{WAKE_WHISPER_MODEL}' cargado en {device.upper()}.")
+        except Exception as e:
+            logger.warning(f"No se pudo cargar el modelo de wake '{WAKE_WHISPER_MODEL}': {e}")
+            self._wake_whisper_model = self._whisper_model   # fallback al de comando
+
     def _init_pygame(self) -> None:
         """Inicializa pygame.mixer para reproducción de TTS y beeps."""
         try:
@@ -800,6 +827,27 @@ class JARVISBrain:
             f"Edge-TTS pre-calentado. "
             f"{len(self._wake_audio_cache)}/{len(self._WAKE_PHRASES)} frases en caché."
         )
+
+    def play_wake_beep(self) -> None:
+        """
+        Reproduce un beep corto de 2 tonos (~0.2s) al activarse. Bloqueante.
+        Más rápido que una frase hablada → la captura del comando empieza antes.
+        """
+        if self._is_silent_mode() or not self._pygame_initialized:
+            return
+        try:
+            sample_rate = 22050
+            for freq, duration in [(880, 0.07), (1320, 0.10)]:
+                t = np.linspace(0, duration, int(sample_rate * duration), False)
+                wave = (np.sin(2 * np.pi * freq * t) * 0.6 * 32767).astype(np.int16)
+                stereo = np.column_stack([wave, wave])
+                sound = pygame.sndarray.make_sound(stereo)
+                sound.set_volume(1.0)
+                channel = sound.play()
+                while channel and channel.get_busy():
+                    pygame.time.wait(10)
+        except Exception as e:
+            logger.debug(f"Wake beep error: {e}")
 
     def play_wake_phrase(self) -> None:
         """
@@ -845,16 +893,20 @@ class JARVISBrain:
         audio: np.ndarray,
         beam_size: int = 1,
         use_prompt: bool = True,
+        model=None,
     ) -> str:
         """
         Ejecuta faster-whisper y retorna el texto completo.
         Siempre llamar con _whisper_lock adquirido.
 
-        use_prompt=False en keyword check: evita que Whisper alucinó el
+        model: modelo a usar (por defecto el de comando). check_wake_keyword pasa
+        el modelo 'tiny' dedicado.
+        use_prompt=False en keyword check: evita que Whisper alucine el
         initial_prompt cuando recibe ruido/silencio y detecte wake words
         que él mismo inventó.
         """
-        segments, info = self._whisper_model.transcribe(
+        whisper = model or self._whisper_model
+        segments, info = whisper.transcribe(
             audio.astype(np.float32),
             language=WHISPER_LANGUAGE,
             beam_size=beam_size,
@@ -881,7 +933,9 @@ class JARVISBrain:
         """
         from config import WAKE_KEYWORDS
 
-        if self._whisper_model is None:
+        # Usar el modelo 'tiny' dedicado; si aún no cargó, caer al de comando
+        wake_model = self._wake_whisper_model or self._whisper_model
+        if wake_model is None:
             return
 
         if self._is_processing:
@@ -903,7 +957,9 @@ class JARVISBrain:
             if len(audio) < SAMPLE_RATE:
                 audio = np.pad(audio, (0, SAMPLE_RATE - len(audio)))
 
-            text = self._whisper_transcribe(audio, beam_size=1, use_prompt=False).lower()
+            text = self._whisper_transcribe(
+                audio, beam_size=1, use_prompt=False, model=wake_model
+            ).lower()
             logger.info(f"[KW] Whisper: '{text}'")
 
             for kw in WAKE_KEYWORDS:

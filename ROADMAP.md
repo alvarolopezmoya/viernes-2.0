@@ -32,9 +32,11 @@ Estos módulos están completos en el repo pero aún no conectados al pipeline d
 - Cablear `file_manager` con **confirmación por voz** para acciones destructivas
 - Conectar `semantic_router` como fallback entre keywords y conversación libre
 
-### 2. Wake-word dedicado (alto valor de rendimiento)
-- Sustituir la transcripción continua con Whisper `medium` por **openWakeWord** o **Porcupine**
-- Libera VRAM y reduce falsas activaciones; Whisper queda solo para el comando real
+### 2. Wake-word optimizado ✅ (hecho)
+- Modelo Whisper `tiny` DEDICADO para la escucha continua (~10ms/inferencia vs
+  ~200-400ms): libera GPU, elimina descarte por lock. El comando se transcribe
+  con el modelo grande. Beep corto en vez de frase. Mantiene "Viernes".
+- (Futuro opcional: motor dedicado openWakeWord/Porcupine para latencia ~30ms)
 
 ### 3. Calidad y robustez
 - `PRAGMA journal_mode=WAL` en SQLite (varias conexiones concurrentes)

@@ -34,8 +34,9 @@ WAKE_KEYWORDS: list[str] = [
 
 # VAD: energía mínima para considerar que hay voz (ajustable según micrófono)
 VAD_ENERGY_THRESHOLD: float = 0.003
-# Duración de cada segmento de voz enviado para detectar la palabra clave
-KEYWORD_SEGMENT_SEC: float = 2.5
+# Duración de cada segmento de voz enviado para detectar la palabra clave.
+# 1.2s basta para "Viernes" y reduce el peor caso de latencia de activación.
+KEYWORD_SEGMENT_SEC: float = 1.2
 # Tiempo de cooldown tras activación (evita re-activaciones inmediatas)
 WAKE_COOLDOWN_SEC: float = 2.0
 # Pausa inicial antes de capturar el comando (evita capturar la propia palabra clave)
@@ -55,6 +56,10 @@ WHISPER_MODEL: str = _hw_config.get("whisper_model", "tiny")
 WHISPER_DEVICE: str = _hw_config.get("whisper_device", "cpu")
 WHISPER_THREADS: int = _hw_config.get("whisper_threads", 4)
 WHISPER_LANGUAGE: str = "es"             # Forzar español para mayor velocidad
+# Modelo DEDICADO para detectar la palabra clave en bucle continuo. 'tiny' es
+# 3-4× más rápido y minúscula VRAM — suficiente para oír "Viernes". El comando
+# real se transcribe con el modelo grande (WHISPER_MODEL) para máxima calidad.
+WAKE_WHISPER_MODEL: str = _hw_config.get("wake_whisper_model", "tiny")
 
 # Vocabulario de contexto para Whisper — mejora el reconocimiento de comandos
 WHISPER_INITIAL_PROMPT: str = (
