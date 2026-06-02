@@ -491,7 +491,7 @@ def write_file_content(path: str | Path, content: str) -> dict[str, Any]:
 
 
 def create_file(file_name: str, location: str = "desktop", content: str = "") -> dict[str, Any]:
-    """Crea un nuevo archivo en la ubicación indicada."""
+    """Crea un nuevo archivo en la ubicación indicada (sin sobrescribir uno existente)."""
     location_map = {
         "desktop": _HOME / "Desktop",
         "escritorio": _HOME / "Desktop",
@@ -505,7 +505,111 @@ def create_file(file_name: str, location: str = "desktop", content: str = "") ->
     # Añadir extensión .txt si no tiene
     if not path.suffix:
         path = path.with_suffix(".txt")
+    # NO sobrescribir silenciosamente: si existe, buscar un nombre libre "(2)", "(3)"…
+    if path.exists():
+        stem, suffix, parent = path.stem, path.suffix, path.parent
+        n = 2
+        while (parent / f"{stem} ({n}){suffix}").exists():
+            n += 1
+        path = parent / f"{stem} ({n}){suffix}"
     return write_file_content(path, content)
+
+
+# ================================================================
+# Edición de contenido por voz (con backup .bak automático)
+# ================================================================
+
+def _backup_file(path: Path) -> None:
+    """Crea una copia .bak antes de modificar un archivo (red de seguridad)."""
+    try:
+        if path.exists():
+            shutil.copy2(str(path), str(path) + ".bak")
+    except Exception as e:
+        logger.warning(f"No se pudo crear backup de {path}: {e}")
+
+
+def _is_editable_text(path: Path) -> bool:
+    """Solo permitimos editar archivos de texto (no corromper binarios)."""
+    return path.suffix.lower() in TEXT_EXTENSIONS or path.suffix == ""
+
+
+def _resolve_existing(file_name: str) -> Optional[Path]:
+    """Busca un archivo existente por nombre (carpetas comunes → disco completo)."""
+    results = find_file(file_name) or find_file(file_name, full_disk=True)
+    return results[0] if results else None
+
+
+def append_to_file(file_name: str, text: str) -> dict[str, Any]:
+    """Añade texto al final de un archivo de texto existente."""
+    if not text:
+        return {"success": False, "message": "No me dijo qué añadir, Señor.", "data": None}
+    path = _resolve_existing(file_name)
+    if not path:
+        return {"success": False, "message": f"No encontré ningún archivo llamado '{file_name}', Señor.", "data": None}
+    if not _is_editable_text(path):
+        return {"success": False, "message": f"'{path.name}' no es un archivo de texto que pueda editar, Señor.", "data": None}
+    try:
+        _backup_file(path)
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        sep = "" if (not existing or existing.endswith("\n")) else "\n"
+        path.write_text(existing + sep + text + "\n", encoding="utf-8")
+        return {"success": True, "message": f"Añadido a {path.name}, Señor.", "data": str(path)}
+    except Exception as e:
+        return {"success": False, "message": str(e), "data": None}
+
+
+def replace_in_file(file_name: str, old: str, new: str) -> dict[str, Any]:
+    """Reemplaza texto dentro de un archivo de texto existente."""
+    if not old:
+        return {"success": False, "message": "No me dijo qué texto reemplazar, Señor.", "data": None}
+    path = _resolve_existing(file_name)
+    if not path:
+        return {"success": False, "message": f"No encontré ningún archivo llamado '{file_name}', Señor.", "data": None}
+    if not _is_editable_text(path):
+        return {"success": False, "message": f"'{path.name}' no es un archivo de texto que pueda editar, Señor.", "data": None}
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        # Búsqueda tolerante a mayúsculas si no hay coincidencia exacta
+        count = content.count(old)
+        if count == 0:
+            import re as _re
+            pattern = _re.compile(_re.escape(old), _re.IGNORECASE)
+            count = len(pattern.findall(content))
+            if count == 0:
+                return {"success": False, "message": f"No encontré '{old}' en {path.name}, Señor.", "data": None}
+            _backup_file(path)
+            content = pattern.sub(new, content)
+        else:
+            _backup_file(path)
+            content = content.replace(old, new)
+        path.write_text(content, encoding="utf-8")
+        veces = "vez" if count == 1 else "veces"
+        return {"success": True, "message": f"Reemplazado en {path.name}, {count} {veces}, Señor.", "data": str(path)}
+    except Exception as e:
+        return {"success": False, "message": str(e), "data": None}
+
+
+def overwrite_file(file_name: str, content: str) -> dict[str, Any]:
+    """
+    Escribe contenido en un archivo (sobrescribe el existente con backup, o crea
+    uno nuevo en el Escritorio si no existe). Usado por el modo dictado.
+    """
+    path = _resolve_existing(file_name)
+    if path:
+        if not _is_editable_text(path):
+            return {"success": False, "message": f"'{path.name}' no es un archivo de texto que pueda editar, Señor.", "data": None}
+        _backup_file(path)
+    else:
+        # No existe → crearlo en el Escritorio
+        path = _HOME / "Desktop" / file_name
+        if not path.suffix:
+            path = path.with_suffix(".txt")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
+        return {"success": True, "message": f"Guardado en {path.name}, Señor.", "data": str(path)}
+    except Exception as e:
+        return {"success": False, "message": str(e), "data": None}
 
 
 def rename_file(file_name: str, new_name: str) -> dict[str, Any]:
@@ -597,18 +701,9 @@ def delete_file(file_name: str, to_recycle: bool = True) -> dict[str, Any]:
     path = results[0]
     try:
         if to_recycle:
-            # Usar PowerShell para mover a la papelera
-            ps_cmd = (
-                f'Add-Type -AssemblyName Microsoft.VisualBasic; '
-                f'[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('
-                f'"{path}", '
-                f'"OnlyErrorDialogs", '
-                f'"SendToRecycleBin")'
-            )
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                timeout=10, capture_output=True,
-            )
+            # send2trash: mueve a la papelera sin shell (evita inyección por la ruta)
+            from send2trash import send2trash
+            send2trash(str(path))
         else:
             path.unlink()
         return {"success": True, "message": f"'{path.name}' eliminado.", "data": str(path)}

@@ -731,6 +731,27 @@ def delete_file_action(file_name: str = "") -> dict[str, Any]:
     return delete_file(file_name, to_recycle=True)
 
 
+def append_to_file_action(file_name: str = "", text: str = "") -> dict[str, Any]:
+    from file_manager import append_to_file
+    if not file_name:
+        return {"success": False, "message": "No especificó a qué archivo añadir.", "data": None}
+    return append_to_file(file_name, text)
+
+
+def replace_in_file_action(file_name: str = "", old: str = "", new: str = "") -> dict[str, Any]:
+    from file_manager import replace_in_file
+    if not file_name:
+        return {"success": False, "message": "No especificó en qué archivo reemplazar.", "data": None}
+    return replace_in_file(file_name, old, new)
+
+
+def write_to_file_action(file_name: str = "", content: str = "") -> dict[str, Any]:
+    from file_manager import overwrite_file
+    if not file_name:
+        return {"success": False, "message": "No especificó en qué archivo escribir.", "data": None}
+    return overwrite_file(file_name, content)
+
+
 def list_directory_action(location: str = "escritorio") -> dict[str, Any]:
     from file_manager import list_directory
     return list_directory(location)
@@ -911,6 +932,9 @@ ACTIONS: dict[str, Any] = {
     "move_file": move_file_action,
     "copy_file": copy_file_action,
     "delete_file": delete_file_action,
+    "append_to_file": append_to_file_action,
+    "replace_in_file": replace_in_file_action,
+    "write_to_file": write_to_file_action,
     "list_directory": list_directory_action,
     "recent_files": recent_files_action,
     "read_notifications": read_notifications,

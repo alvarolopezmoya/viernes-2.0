@@ -407,6 +407,16 @@ class JARVISBrain:
             "borrar el archivo", "eliminar el archivo",
             "manda a la papelera", "tira el archivo",
         ],
+        # ── Edición de contenido por voz ──
+        "replace_in_file": [
+            "reemplaza", "sustituye", "reemplazar", "reemplázalo", "reemplazalo",
+        ],
+        "write_to_file": [
+            "escribe en", "escribe un texto en", "escribe una nota en",
+            "dicta en", "dicta", "voy a dictar", "quiero dictar",
+            "toma nota en", "toma nota", "apunta en", "anota en",
+            "apunta que", "anota que", "apúntalo en", "anótalo en",
+        ],
         "list_directory": [
             "qué hay en el escritorio", "qué hay en documentos",
             "lista el escritorio", "lista documentos",
@@ -557,6 +567,8 @@ class JARVISBrain:
         "move_file": ["Moviéndolo.", "En camino a su sitio.", "Enseguida."],
         "copy_file": ["Copiándolo.", "Haciendo una copia.", "Al momento."],
         "delete_file": ["A la papelera.", "Eliminándolo.", "Fuera."],
+        "replace_in_file": ["Reemplazando.", "Cambiando eso.", "Al momento."],
+        "write_to_file": [],   # El prompt de dictado lo habla el handler
         "list_directory": ["Veamos qué hay.", "Echando un vistazo.", "Un momento."],
         "recent_files": ["Repasando lo reciente.", "Veamos qué ha tocado.", "Un momento."],
         "search_memory": ["Déjeme recordar.", "Revisando el historial.", "Un momento, lo busco."],
@@ -615,6 +627,8 @@ class JARVISBrain:
         self._silent_until: Optional[float] = None  # timestamp Unix hasta el que VIERNES calla
         # Diálogo de confirmación para acciones destructivas (borrar/mover/renombrar)
         self._pending_confirmation: Optional[dict] = None
+        # Modo dictado: acumula frases para escribir en un archivo hasta "fin"
+        self._dictation: Optional[dict] = None
         # Protege _is_processing y _pending_confirmation entre threads
         # (process_voice, watcher de notificaciones, captura de respuestas)
         self._state_lock = threading.Lock()
@@ -711,8 +725,10 @@ class JARVISBrain:
     def _on_new_notification(self, msg: str) -> None:
         """Callback del watcher: habla la notificación si VIERNES no está ocupado."""
         with self._state_lock:
-            busy = self._is_processing or self._pending_confirmation is not None
-        # No interrumpir un comando en curso, una confirmación pendiente ni el modo DND
+            busy = (self._is_processing
+                    or self._pending_confirmation is not None
+                    or self._dictation is not None)
+        # No interrumpir un comando, una confirmación, un dictado ni el modo DND
         if busy or self._is_silent_mode():
             return
         threading.Thread(
@@ -1041,6 +1057,142 @@ class JARVISBrain:
         return True
 
     # ----------------------------------------------------------------
+    # Edición de contenido por voz: reemplazo y dictado
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _extract_replace_params(text: str) -> tuple[str, str, str]:
+        """
+        Extrae (archivo, viejo, nuevo) de frases como:
+          'en notas reemplaza hola por adiós'
+          'reemplaza perro por gato en el archivo cuento'
+        """
+        t = text.lower().strip()
+        # Caso: "en <ARCHIVO> reemplaza <VIEJO> por <NUEVO>"
+        m = re.match(
+            r"^en\s+(?:el archivo\s+|el fichero\s+|la nota\s+|mi\s+)?(.+?)\s+"
+            r"(?:reemplaza|sustituye|cambia)\s+(.+?)\s+por\s+(.+)$", t)
+        if m:
+            return (JARVISBrain._normalize_spoken_filename(m.group(1)),
+                    m.group(2).strip(" .,?¿"), m.group(3).strip(" .,?¿"))
+        # Caso: "reemplaza <VIEJO> por <NUEVO> [en <ARCHIVO>]"
+        m = re.search(
+            r"(?:reemplaza|sustituye|cambia)\s+(.+?)\s+por\s+(.+?)"
+            r"(?:\s+en\s+(?:el archivo\s+|el fichero\s+|la nota\s+|mi\s+)?(.+))?$", t)
+        if m:
+            file_name = JARVISBrain._normalize_spoken_filename(m.group(3)) if m.group(3) else ""
+            return file_name, m.group(1).strip(" .,?¿"), m.group(2).strip(" .,?¿")
+        return "", "", ""
+
+    @staticmethod
+    def _extract_dictation_target(text: str) -> str:
+        """Extrae el archivo de 'escribe en X' / 'dicta en X' / 'apunta en X'."""
+        t = text.lower().strip()
+        for trig in (
+            "escribe un texto en", "escribe una nota en", "escribe en",
+            "toma nota en", "apúntalo en", "anótalo en", "apunta en", "anota en",
+            "dicta en",
+        ):
+            if trig in t:
+                cand = t.split(trig, 1)[-1].strip(" .,?¿")
+                if cand:
+                    return JARVISBrain._normalize_spoken_filename(cand)
+        return ""   # "dicta" / "toma nota" sin archivo → se usará un nombre por defecto
+
+    # Palabras que cierran o cancelan un dictado
+    _DICT_CLOSE: frozenset = frozenset({
+        "fin", "termina", "termino", "terminado", "guarda", "guardar",
+        "listo", "para", "parar", "detente", "ya",
+    })
+    _DICT_CANCEL: frozenset = frozenset({
+        "cancela", "cancelar", "olvidalo", "descarta", "descartar", "dejalo", "anula",
+    })
+
+    def _start_dictation(self, original_text: str) -> None:
+        """Entra en modo dictado: las siguientes frases se escriben en un archivo."""
+        file_name = self._extract_dictation_target(original_text) or "notas"
+        with self._state_lock:
+            self._dictation = {"file_name": file_name, "buffer": [], "ts": time.time()}
+        prompt = (
+            f"Le escucho, Señor. Dicte lo que quiera guardar en {file_name}. "
+            f"Diga 'fin' para guardar, o 'cancela' para descartar."
+        )
+        self.on_message(JARVIS_NAME, prompt)
+        self._speak_sync(prompt)
+        self._trigger_listen_again()
+
+    def _handle_dictation(self, text: str) -> bool:
+        """
+        Procesa una frase durante el dictado: la acumula, o finaliza/cancela.
+        Retorna True si consumió el texto; False si el dictado expiró (el texto
+        se procesa entonces como comando normal).
+        """
+        with self._state_lock:
+            dictation = self._dictation
+        if not dictation:
+            return False
+
+        # Expirado (>120s sin actividad) → guardar lo que haya y soltar el texto
+        if time.time() - dictation.get("ts", 0) > 120:
+            self._finalize_dictation(dictation)
+            with self._state_lock:
+                self._dictation = None
+            return False
+
+        norm = "".join(
+            c for c in unicodedata.normalize("NFD", text.lower().strip())
+            if unicodedata.category(c) != "Mn"
+        )
+        words = norm.split()
+        is_close = (
+            norm in ("fin del dictado", "eso es todo", "ya esta")
+            or (len(words) <= 2 and any(w in self._DICT_CLOSE for w in words))
+        )
+        is_cancel = len(words) <= 2 and any(w in self._DICT_CANCEL for w in words)
+
+        if is_cancel:
+            with self._state_lock:
+                self._dictation = None
+            msg = "Dictado cancelado, Señor. No he escrito nada."
+            self.on_message(JARVIS_NAME, msg)
+            self._speak_sync(msg)
+            return True
+
+        if is_close:
+            with self._state_lock:
+                self._dictation = None
+            self._finalize_dictation(dictation)
+            return True
+
+        # Acumular la frase y seguir escuchando
+        dictation["buffer"].append(text.strip())
+        dictation["ts"] = time.time()
+        import random
+        self._speak_sync(random.choice(["Sigo.", "Anotado.", "Continúe.", "Vale."]), cached=True)
+        self._trigger_listen_again()
+        return True
+
+    def _finalize_dictation(self, dictation: dict) -> None:
+        """Escribe el contenido dictado: añade si el archivo existe, crea si no."""
+        from file_manager import append_to_file, overwrite_file, _resolve_existing
+        file_name = dictation.get("file_name") or "notas"
+        content = "\n".join(dictation.get("buffer", [])).strip()
+        if not content:
+            msg = "No dictó nada, Señor. Lo dejamos en nada, pues."
+            self.on_message(JARVIS_NAME, msg)
+            self._speak_sync(msg)
+            return
+        if _resolve_existing(file_name):
+            result = append_to_file(file_name, content)
+        else:
+            result = overwrite_file(file_name, content)
+        msg = result.get("message", "Guardado, Señor.")
+        self.on_message(JARVIS_NAME, msg)
+        self.memory.save_conversation(f"[dictado] {file_name}", msg, "write_to_file", str(result))
+        self.on_task_logged("Dictado")
+        self._speak_sync(msg)
+
+    # ----------------------------------------------------------------
     # Pipeline principal
     # ----------------------------------------------------------------
 
@@ -1068,6 +1220,14 @@ class JARVISBrain:
                 return
 
             self.on_message("Tú", text)
+
+            # Modo dictado activo → acumular o finalizar (tiene prioridad)
+            with self._state_lock:
+                dictating = self._dictation is not None
+            if dictating:
+                if self._handle_dictation(text):
+                    return
+                # Expirado → seguir procesando como comando normal
 
             # Confirmación pendiente de una acción destructiva → interpretar sí/no
             with self._state_lock:
@@ -1345,6 +1505,20 @@ class JARVISBrain:
         if intent == "delete_file":
             file_name = self._extract_file_name(original_text)
             return action_fn(file_name=file_name)
+
+        if intent == "replace_in_file":
+            file_name, old, new = self._extract_replace_params(original_text)
+            if not file_name or not old:
+                msg = "No entendí qué reemplazar ni en qué archivo, Señor. Diga 'en el archivo X reemplaza A por B'."
+                self.on_message(JARVIS_NAME, msg)
+                self._speak_sync(msg)
+                return None
+            return action_fn(file_name=file_name, old=old, new=new)
+
+        if intent == "write_to_file":
+            # Inicia el modo dictado: el contenido llega en las siguientes frases
+            self._start_dictation(original_text)
+            return None
 
         if intent == "list_directory":
             location = self._extract_location(original_text)
