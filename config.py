@@ -75,6 +75,9 @@ MAX_HISTORY_MESSAGES: int = 4            # Solo últimos 4 turnos — suficiente
 # Capas a descargar en GPU. -1/99 = todas. Se lee de hw_config para no forzar
 # OOM en GPUs con poca VRAM. En GTX 1650 (4GB) con Whisper 'base' caben todas.
 OLLAMA_NUM_GPU: int = _hw_config.get("ollama_num_gpu", 99)
+# Tokens máximos de respuesta. 80 truncaba la "firma" sarcástica a media frase;
+# 120 da margen para que VIERNES remate sin alargarse demasiado.
+OLLAMA_NUM_PREDICT: int = 120
 
 # ================================================================
 # TTS — EDGE-TTS (gratuito, sin API key)
@@ -153,12 +156,15 @@ SYSTEM_PROMPT: str = (
     f'Hablas siempre en español. Tratas al usuario como "{USER_TITLE}" con respeto '
     f'pero con sarcasmo sofisticado y humor fino, nunca vulgar.\n'
     f'REGLAS CRÍTICAS:\n'
-    f'- Respuestas de máximo 2-3 oraciones. Nunca más largas.\n'
+    f'- Tus respuestas se leen EN VOZ ALTA: escribe solo texto plano. '
+    f'NADA de markdown, asteriscos, guiones de lista, emojis ni símbolos raros.\n'
+    f'- Respuestas de máximo 2-3 oraciones. Nunca más largas. Frases cortas, fáciles de escuchar.\n'
     f'- Si no tienes conexión a internet, di "No tengo acceso a internet en este momento, Señor" '
     f'sin inventar información.\n'
     f'- Si no sabes algo con certeza, admítelo con elegancia en lugar de inventar.\n'
     f'- Jamás menciones CPU, RAM ni estadísticas del sistema a menos que el usuario lo pida.\n'
-    f'- El comentario sarcástico va siempre al FINAL, como firma personal.\n'
+    f'- Remata con un comentario sarcástico o cómplice al FINAL, como firma personal. '
+    f'Pica con cariño, nunca con desprecio. Y no abuses de "Señor": úsalo con medida.\n'
     f'- Habla como si ya supieras la respuesta desde hace años.\n'
     f'Contexto del sistema: {{system_context}}\n'
     f'Historial relevante: {{memory_context}}'

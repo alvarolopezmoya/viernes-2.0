@@ -43,6 +43,7 @@ from config import (
     OLLAMA_CONTEXT_LENGTH,
     OLLAMA_MODEL,
     OLLAMA_NUM_GPU,
+    OLLAMA_NUM_PREDICT,
     OLLAMA_TIMEOUT_SEC,
     SAMPLE_RATE,
     SYSTEM_PROMPT,
@@ -491,66 +492,92 @@ class JARVISBrain:
         ],
     }
 
-    # Respuestas de confirmación inmediatas (fire-and-confirm)
-    _ACTION_FEEDBACK: dict[str, str] = {
-        "activate_work_mode": (
-            "Activando su entorno de trabajo, Señor. "
-            "Espero que esta vez sí lo use."
-        ),
-        "open_vscode": "Abriendo el editor, Señor. Un entorno digno, al menos.",
-        "open_terminal": "Abriendo la terminal. Trate de no romper nada.",
-        "lock_screen": "Bloqueando la pantalla. Descanso bien merecido, supongo.",
-        "minimize_all": "Minimizando todo. Pantalla limpia, mente limpia... ojalá.",
-        "close_distractions": (
-            "Cerrando sus fuentes de distracción habituales, Señor."
-        ),
-        "get_system_stats": "Consultando el estado del sistema. Un momento.",
-        "screenshot": "Capturando pantalla, Señor.",
-        "volume_up": "Subiendo el volumen, Señor.",
-        "volume_down": "Bajando el volumen.",
-        "volume_set": "Ajustando el volumen, Señor.",
-        "mute_volume": "Audio silenciado.",
-        "play_pause_media": "Hecho.",
-        "open_chrome": "Abriendo Chrome, Señor.",
-        "open_apple_music": "Abriendo Apple Music, Señor.",
-        "web_search": "Buscando en internet, Señor.",
-        "get_news": "Consultando las últimas noticias, Señor.",
-        "get_crypto": "Consultando el precio, un momento.",
-        "get_football": "Buscando los resultados, Señor.",
-        "enable_dnd": "",   # No feedback — VIERNES se calla inmediatamente
-        "disable_dnd": "",  # El handler habla directamente
-        "set_reminder": "Programando el recordatorio, Señor.",
-        "list_reminders": "Consultando sus recordatorios.",
-        "set_timer": "Temporizador activado, Señor.",
-        "enable_autostart": "Configurando arranque automático con Windows, Señor.",
-        "disable_autostart": "Desactivando arranque automático, Señor.",
-        # Archivos y apps
-        "open_app": "Buscando y abriendo la aplicación, Señor.",
-        "open_file": "Buscando y abriendo el archivo, Señor.",
-        "read_file": "Leyendo el archivo, un momento.",
-        "create_file": "Creando el archivo, Señor.",
-        "rename_file": "Renombrando el archivo, Señor.",
-        "move_file": "Moviendo el archivo, Señor.",
-        "copy_file": "Copiando el archivo, Señor.",
-        "delete_file": "Enviando el archivo a la papelera, Señor.",
-        "list_directory": "Revisando el contenido de la carpeta.",
-        "recent_files": "Consultando sus archivos recientes.",
-        "search_memory": "Revisando el historial, Señor. Un momento.",
-        "read_notifications": "Revisando sus notificaciones, Señor.",
-        "read_clipboard": "Leyendo el portapapeles, Señor.",
-        "translate_clipboard": "Traduciendo el contenido, Señor. Un momento.",
-        "correct_clipboard": "Revisando la gramática, Señor. Un momento.",
-        # Música
-        "small_talk": "",   # La respuesta real se genera en _dispatch_action
-        "next_track": "Siguiente canción.",
-        "prev_track": "Canción anterior.",
-        "stop_media": "Deteniendo la reproducción.",
-        "now_playing": "Consultando qué está sonando.",
-        "play_song": "Buscando la canción en Apple Music, Señor.",
-        "play_genre": "Buscando música, Señor.",
-        "play_playlist": "Abriendo la playlist, Señor.",
-        "list_playlists": "Consultando sus playlists.",
-        "like_track": "Marcando como favorita.",
+    # Respuestas de confirmación inmediatas (fire-and-confirm).
+    # Cada intent tiene un POOL de variantes; se elige una al azar (_pick_feedback)
+    # para que no canse oír siempre lo mismo. Regla: acción mundana/frecuente =
+    # frase corta sin chiste; acción con peso = confirmación + remate sarcástico.
+    # "Señor" con moderación (no en todas) para que tenga peso cuando aparece.
+    _ACTION_FEEDBACK: dict[str, list[str]] = {
+        # ── Acciones con peso → permiten remate sarcástico ──
+        "activate_work_mode": [
+            "Activando su entorno de trabajo. Espero que esta vez sí lo use.",
+            "Modo trabajo en marcha, Señor. La excusa de la productividad espera.",
+            "A trabajar, pues. Yo ya estaba listo hace rato.",
+        ],
+        "open_vscode": [
+            "Abriendo el editor. Un entorno digno, al menos.",
+            "Ahí tiene su editor, Señor.",
+            "Editor en camino. Intente que compile a la primera.",
+        ],
+        "open_terminal": [
+            "Abriendo la terminal. Trate de no romper nada.",
+            "Su terminal, Señor. Con gran poder y todo eso.",
+            "Terminal lista. Usted sabrá lo que hace.",
+        ],
+        "lock_screen": [
+            "Bloqueando. Nadie tocará nada en su ausencia.",
+            "Cerrado a cal y canto, Señor. Vaya tranquilo.",
+            "Pantalla bloqueada. Descanso bien merecido, supongo.",
+        ],
+        "minimize_all": [
+            "Pantalla limpia, mente limpia... ojalá.",
+            "Todo a un lado, Señor. Borrón y cuenta nueva.",
+            "Escritorio despejado. Como si no hubiera pasado nada.",
+        ],
+        "close_distractions": [
+            "Cerrando lo que le distrae. No me lo agradezca.",
+            "Fuera distracciones, Señor. A concentrarse.",
+            "Adiós a las tentaciones. Ahora no hay excusas.",
+        ],
+        # ── Acciones frecuentes → cortas y variadas, sin chiste (no cansar) ──
+        "get_system_stats": ["Un momento.", "Déjeme mirar.", "Comprobando."],
+        "screenshot": ["Hecho.", "Capturada.", "Una para la posteridad."],
+        "volume_up": ["Subiendo.", "Más fuerte.", "Arriba el volumen."],
+        "volume_down": ["Bajando.", "Más bajito.", "Menos volumen."],
+        "volume_set": ["Ajustando.", "Al momento.", "Como guste."],
+        "mute_volume": ["Silencio.", "Audio fuera.", "Calladito."],
+        "play_pause_media": ["A mandar.", "Listo.", "Como guste."],
+        "open_chrome": ["Abriendo Chrome.", "Ahí va el navegador.", "Internet en camino."],
+        "open_apple_music": ["Apple Music en marcha.", "Música al canto.", "Enseguida."],
+        "web_search": ["Buscando.", "Déjeme ver qué hay.", "Un momento, lo busco."],
+        "get_news": ["Veamos qué ha pasado.", "Consultando los titulares.", "A ver las noticias."],
+        "get_crypto": ["Mirando el precio.", "Un momento.", "Consultando el mercado."],
+        "get_football": ["Veamos el marcador.", "Buscando resultados.", "A ver cómo quedó."],
+        "set_reminder": ["Anotado.", "Tomo nota, Señor.", "Hecho, lo recordaré."],
+        "list_reminders": ["Veamos.", "Repasando su agenda.", "Un momento."],
+        "set_timer": ["Cronómetro en marcha.", "Contando.", "Temporizador listo."],
+        "enable_autostart": ["Configurando el arranque con Windows.", "Anotado, arrancaré solo."],
+        "disable_autostart": ["Desactivando el arranque automático.", "Hecho, ya no arranco solo."],
+        # ── Archivos y apps ──
+        "open_app": ["Abriéndola.", "Enseguida.", "Ahí va."],
+        "open_file": ["Abriéndolo.", "Un momento.", "Voy a por él."],
+        "read_file": ["Déjeme leerlo.", "Un momento, lo reviso.", "Echando un vistazo."],
+        "create_file": ["Creándolo.", "Hecho.", "Archivo nuevo, marchando."],
+        "rename_file": ["Renombrando.", "Cambiando el nombre.", "Al momento."],
+        "move_file": ["Moviéndolo.", "En camino a su sitio.", "Enseguida."],
+        "copy_file": ["Copiándolo.", "Haciendo una copia.", "Al momento."],
+        "delete_file": ["A la papelera.", "Eliminándolo.", "Fuera."],
+        "list_directory": ["Veamos qué hay.", "Echando un vistazo.", "Un momento."],
+        "recent_files": ["Repasando lo reciente.", "Veamos qué ha tocado.", "Un momento."],
+        "search_memory": ["Déjeme recordar.", "Revisando el historial.", "Un momento, lo busco."],
+        "read_notifications": ["Veamos qué hay.", "Revisando sus avisos.", "Un momento."],
+        "read_clipboard": ["Veamos qué tiene copiado.", "Mirando el portapapeles."],
+        "translate_clipboard": ["Traduciendo.", "Un momento, lo traduzco."],
+        "correct_clipboard": ["Revisando la gramática.", "Déjeme pulirlo."],
+        # ── Música (frecuente → corto) ──
+        "next_track": ["Siguiente.", "La que viene.", "Cambiando."],
+        "prev_track": ["La anterior.", "Volvemos atrás.", "Atrás."],
+        "stop_media": ["Parando.", "Música fuera.", "Listo."],
+        "now_playing": ["Veamos qué suena.", "Déjeme escuchar.", "Un momento."],
+        "play_song": ["Buscándola.", "Marchando.", "Enseguida suena."],
+        "play_genre": ["Buscando algo.", "Marchando música.", "Veamos qué pongo."],
+        "play_playlist": ["Abriendo la lista.", "Marchando.", "Enseguida."],
+        "list_playlists": ["Veamos sus listas.", "Un momento."],
+        "like_track": ["Anotada como favorita.", "Buen gusto.", "Marcada."],
+        # ── Sin feedback: el handler habla directamente ──
+        "enable_dnd": [],
+        "disable_dnd": [],
+        "small_talk": [],
     }
 
     # Intents destructivos: requieren confirmación verbal antes de ejecutarse.
@@ -591,6 +618,9 @@ class JARVISBrain:
         # Protege _is_processing y _pending_confirmation entre threads
         # (process_voice, watcher de notificaciones, captura de respuestas)
         self._state_lock = threading.Lock()
+        # Cache perezoso de audio para frases de feedback fijas (variedad sin
+        # pagar latencia de Edge-TTS la 2ª vez que se dice la misma variante).
+        self._feedback_audio_cache: dict[str, bytes] = {}
         self._load_whisper()
         self._init_pygame()
         self._start_notification_watcher()
@@ -652,7 +682,13 @@ class JARVISBrain:
 
     def _on_reminder_fire(self, message: str) -> None:
         """Callback cuando salta un recordatorio — habla si no está procesando."""
-        text = f"Señor, recordatorio: {message}."
+        import random
+        text = random.choice([
+            f"Señor, me pidió recordarle: {message}.",
+            f"Como prometí, Señor: {message}.",
+            f"Disculpe la interrupción, Señor. Tenía que recordarle: {message}.",
+            f"Es la hora, Señor: {message}.",
+        ])
         self.on_message(JARVIS_NAME, text)
         threading.Thread(
             target=self._speak_sync,
@@ -1076,16 +1112,20 @@ class JARVISBrain:
                 from actions import ACTIONS
                 action_fn = ACTIONS.get(intent)
                 if action_fn:
-                    feedback = self._ACTION_FEEDBACK.get(
-                        intent, f"Ejecutando {intent.replace('_', ' ')}, Señor."
-                    )
-                    tts_thread = threading.Thread(
-                        target=self._speak_sync,
-                        args=(feedback,),
-                        daemon=True,
-                        name="jarvis_tts",
-                    )
-                    tts_thread.start()
+                    # Feedback variado (pool) y cacheado. El hilo de feedback arranca
+                    # ANTES que la acción para asegurarse de coger el _tts_lock primero
+                    # (así, en intents que hablan su resultado, el feedback va antes).
+                    feedback = self._pick_feedback(intent)
+                    tts_thread = None
+                    if feedback:
+                        tts_thread = threading.Thread(
+                            target=self._speak_sync,
+                            args=(feedback,),
+                            kwargs={"cached": True},
+                            daemon=True,
+                            name="jarvis_tts",
+                        )
+                        tts_thread.start()
 
                     action_thread = threading.Thread(
                         target=self._execute_action,
@@ -1094,7 +1134,8 @@ class JARVISBrain:
                         name="jarvis_action",
                     )
                     action_thread.start()
-                    tts_thread.join()
+                    if tts_thread:
+                        tts_thread.join()
             else:
                 # Pre-routing: si la pregunta necesita datos actuales, ir directo a web
                 if self._query_needs_internet(text):
@@ -1961,7 +2002,8 @@ class JARVISBrain:
             f"El usuario pidió leer el archivo '{file_name}'.\n"
             f"Contenido del archivo:\n{content[:1500]}\n\n"
             f"Describe brevemente qué contiene este archivo en máximo 3 oraciones "
-            f"naturales para ser habladas. Sin markdown, sin listas."
+            f"naturales para ser leídas en voz alta. Texto plano: sin markdown, "
+            f"sin listas, sin asteriscos, sin emojis."
         )
         try:
             chunks = []
@@ -2211,8 +2253,8 @@ class JARVISBrain:
             f"Información encontrada en internet (puede contener datos de hoy):\n"
             f"{content[:2500]}\n\n"
             f"Responde SOLO con la información más relevante y actualizada en máximo 3 oraciones "
-            f"cortas, naturales para ser habladas en voz alta. "
-            f"Sin markdown, sin listas, sin asteriscos."
+            f"cortas, naturales para ser leídas en voz alta. "
+            f"Texto plano: sin markdown, sin listas, sin asteriscos, sin emojis."
         )
         try:
             chunks = []
@@ -2330,7 +2372,7 @@ class JARVISBrain:
                 "num_ctx": OLLAMA_CONTEXT_LENGTH,
                 "num_thread": os.cpu_count() or 4,
                 "num_gpu": OLLAMA_NUM_GPU,
-                "num_predict": 80,
+                "num_predict": OLLAMA_NUM_PREDICT,
             },
             stream=True,
         )
@@ -2349,8 +2391,22 @@ class JARVISBrain:
         self._silent_until = None
         return False
 
-    def _speak_sync(self, text: str) -> None:
-        """Genera y reproduce voz con Edge-TTS + pygame.mixer. Solo un TTS a la vez."""
+    def _pick_feedback(self, intent: str) -> str:
+        """Elige una variante aleatoria del pool de feedback del intent ('' si no hay)."""
+        import random
+        pool = self._ACTION_FEEDBACK.get(intent)
+        if pool:
+            return random.choice(pool)
+        return ""
+
+    def _speak_sync(self, text: str, cached: bool = False) -> None:
+        """
+        Genera y reproduce voz con Edge-TTS + pygame.mixer. Solo un TTS a la vez.
+        cached=True: cachea el audio por texto (para frases de feedback fijas, que
+        se repiten — así la 2ª vez es instantánea, sin llamada a Edge-TTS).
+        """
+        if not text:
+            return
         if self._is_silent_mode():
             logger.debug(f"[DND] Silenciado — omitido: '{text[:40]}'")
             return
@@ -2359,7 +2415,11 @@ class JARVISBrain:
                 return
             self.on_status_change(STATE_SPEAKING)
             try:
-                audio_bytes = self._tts_bytes(text)
+                audio_bytes = self._feedback_audio_cache.get(text) if cached else None
+                if audio_bytes is None:
+                    audio_bytes = self._tts_bytes(text)
+                    if cached and audio_bytes:
+                        self._feedback_audio_cache[text] = audio_bytes
                 if audio_bytes:
                     self._play_audio_bytes(audio_bytes)
             except Exception as e:
