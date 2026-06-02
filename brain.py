@@ -547,6 +547,16 @@ class JARVISBrain:
         "like_track": "Marcando como favorita.",
     }
 
+    # Intents destructivos: requieren confirmación verbal antes de ejecutarse.
+    _CONFIRM_INTENTS: frozenset = frozenset({"delete_file", "move_file", "rename_file"})
+
+    # Palabras que cuentan como "sí" en una confirmación (el resto = cancelar).
+    _AFFIRMATIVE_WORDS: frozenset = frozenset({
+        "si", "sí", "claro", "confirmo", "confirmado", "adelante", "hazlo",
+        "dale", "correcto", "afirmativo", "ok", "okay", "vale", "eso", "exacto",
+        "por supuesto", "procede", "acepto", "sip", "yes",
+    })
+
     def __init__(
         self,
         on_status_change: Optional[Callable[[str], None]] = None,
@@ -568,7 +578,10 @@ class JARVISBrain:
         self._tts_lock = threading.Lock()       # Solo un TTS a la vez — evita solapamiento
         self._stop_speaking = threading.Event()  # Interrumpir TTS en curso
         self._on_keyword_wake_cb: Optional[Callable[[], None]] = None
+        self._on_listen_again_cb: Optional[Callable[[], None]] = None  # re-escuchar sin wake word
         self._silent_until: Optional[float] = None  # timestamp Unix hasta el que VIERNES calla
+        # Diálogo de confirmación para acciones destructivas (borrar/mover/renombrar)
+        self._pending_confirmation: Optional[dict] = None
         self._load_whisper()
         self._init_pygame()
         self._start_notification_watcher()
@@ -846,6 +859,137 @@ class JARVISBrain:
         """Callback a llamar cuando se detecta una palabra clave de activación."""
         self._on_keyword_wake_cb = callback
 
+    def set_on_listen_again_callback(self, callback: Callable[[], None]) -> None:
+        """Callback para re-escuchar SIN wake word (respuestas de confirmación)."""
+        self._on_listen_again_cb = callback
+
+    # ----------------------------------------------------------------
+    # Confirmación verbal de acciones destructivas
+    # ----------------------------------------------------------------
+
+    def _speak_and_log(self, user_text: str, msg: str, intent: str) -> None:
+        """Muestra, guarda y dice un mensaje (helper para respuestas simples)."""
+        self.on_message(JARVIS_NAME, msg)
+        self.memory.save_conversation(user_text, msg, intent)
+        self._speak_sync(msg)
+
+    def _trigger_listen_again(self) -> None:
+        """Reactiva la captura de voz para oír la respuesta a una confirmación."""
+        cb = self._on_listen_again_cb or self._on_keyword_wake_cb
+        if cb:
+            try:
+                cb()
+            except Exception as e:
+                logger.debug(f"listen_again error: {e}")
+
+    def _request_file_confirmation(self, intent: str, original_text: str) -> None:
+        """
+        Acción destructiva: localiza el archivo objetivo, pide confirmación
+        verbal y deja la acción en espera hasta recibir el sí/no.
+        """
+        from file_manager import find_file
+
+        if intent == "delete_file":
+            kwargs = {"file_name": self._extract_file_name(original_text)}
+            verb = "enviar a la papelera"
+        elif intent == "move_file":
+            file_name, destination = self._extract_move_params(original_text)
+            kwargs = {"file_name": file_name, "destination": destination}
+            verb = f"mover a {destination}"
+        elif intent == "rename_file":
+            file_name, new_name = self._extract_rename_params(original_text)
+            kwargs = {"file_name": file_name, "new_name": new_name}
+            verb = f"renombrar a {new_name}"
+        else:
+            return
+
+        if not kwargs.get("file_name"):
+            self._speak_and_log(original_text, "No entendí qué archivo, Señor.", intent)
+            return
+        if intent == "rename_file" and not kwargs.get("new_name"):
+            self._speak_and_log(original_text, "¿A qué nombre lo renombro, Señor?", intent)
+            return
+
+        # Localizar el archivo real para nombrarlo con precisión en la pregunta
+        results = find_file(kwargs["file_name"]) or find_file(kwargs["file_name"], full_disk=True)
+        if not results:
+            self._speak_and_log(
+                original_text,
+                f"No encontré ningún archivo llamado '{kwargs['file_name']}', Señor.",
+                intent,
+            )
+            return
+
+        target = results[0]
+        question = (
+            f"¿Confirma que desea {verb} el archivo {target.name}, Señor? Diga sí o no."
+        )
+        self.on_message(JARVIS_NAME, question)
+        self._pending_confirmation = {
+            "intent": intent,
+            "kwargs": kwargs,
+            "target_name": target.name,
+            "ts": time.time(),
+        }
+        self._speak_sync(question)
+        self._trigger_listen_again()   # Re-escuchar la respuesta sin wake word
+
+    def _handle_confirmation(self, text: str) -> bool:
+        """
+        Interpreta la respuesta a una confirmación pendiente.
+        Retorna True si consumió el texto (sí/no claro); False si fue ambiguo
+        o expiró, en cuyo caso se cancela la acción y el texto sigue su curso
+        como comando normal.
+        """
+        pending = self._pending_confirmation
+        self._pending_confirmation = None
+        if not pending:
+            return False
+
+        # Expirada (>30s) → no consumir; procesar el texto como comando normal
+        if time.time() - pending.get("ts", 0) > 30:
+            logger.info("Confirmación expirada; el texto se procesa como comando normal.")
+            return False
+
+        def _strip(s: str) -> str:
+            s = unicodedata.normalize("NFD", s.lower())
+            return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+        words = set(re.findall(r"\w+", _strip(text)))
+        affirmative = bool(words & {_strip(w) for w in self._AFFIRMATIVE_WORDS})
+        negative = bool(words & {
+            "no", "cancela", "cancelar", "para", "nada", "olvidalo",
+            "dejalo", "negativo", "mejor", "tampoco", "espera",
+        })
+
+        # Ambiguo (ni sí ni no) → cancelar acción por seguridad y seguir como comando
+        if not affirmative and not negative:
+            logger.info("Respuesta de confirmación ambigua; acción destructiva cancelada.")
+            return False
+
+        if affirmative and not negative:
+            from actions import ACTIONS
+            intent = pending["intent"]
+            action_fn = ACTIONS.get(intent)
+            try:
+                result = (
+                    action_fn(**pending["kwargs"]) if action_fn
+                    else {"success": False, "message": "Acción no disponible, Señor."}
+                )
+            except Exception as e:
+                logger.error(f"Error ejecutando acción confirmada '{intent}': {e}")
+                result = {"success": False, "message": "Hubo un error al ejecutar la acción, Señor."}
+            msg = result.get("message", "Hecho, Señor.")
+            self.on_message(JARVIS_NAME, msg)
+            self.memory.save_conversation(f"[confirmado] {intent}", msg, intent, str(result))
+            self.on_task_logged(intent.replace("_", " ").title())
+            self._speak_sync(msg)
+        else:
+            msg = "Cancelado, Señor. No he tocado nada."
+            self.on_message(JARVIS_NAME, msg)
+            self._speak_sync(msg)
+        return True
+
     # ----------------------------------------------------------------
     # Pipeline principal
     # ----------------------------------------------------------------
@@ -874,11 +1018,20 @@ class JARVISBrain:
 
             self.on_message("Tú", text)
 
+            # Confirmación pendiente de una acción destructiva → interpretar sí/no
+            if self._pending_confirmation is not None:
+                if self._handle_confirmation(text):
+                    return
+                # Respuesta ambigua/expirada → seguir procesando como comando normal
+
             # 2. Detectar intención
             intent = self._detect_intent(text)
 
             # 3. Ejecutar según intención
-            if intent == "web_search":
+            if intent in self._CONFIRM_INTENTS:
+                # Acción destructiva → pedir confirmación verbal antes de ejecutar
+                self._request_file_confirmation(intent, text)
+            elif intent == "web_search":
                 from actions import ACTIONS
                 query = self._extract_search_query(text)
                 self._speak_sync("Buscando información, un momento, Señor.")

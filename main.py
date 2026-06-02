@@ -152,7 +152,12 @@ def main() -> None:
         """Palabra clave detectada → activar listener para capturar comando."""
         listener.trigger_wake()
 
+    def _on_listen_again() -> None:
+        """Re-escuchar sin wake word (para respuestas a confirmaciones)."""
+        listener.start_capture_now()
+
     brain.set_on_keyword_wake_callback(_on_keyword_wake)
+    brain.set_on_listen_again_callback(_on_listen_again)
     listener.set_on_wake_callback(_on_wake)
     listener.set_on_command_ready_callback(_on_command)
     listener.set_on_keyword_segment_callback(_on_keyword_segment)
